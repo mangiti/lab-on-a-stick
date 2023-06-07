@@ -1,0 +1,124 @@
+version: "3.4"
+
+services:
+  auth-server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2023.5.3}
+    hostname: authentik
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+    volumes:
+      - auth_media:/media
+      - auth_templates:/templates
+    ports:
+      - "${COMPOSE_PORT_HTTP:-9000}:9000"
+      - "${COMPOSE_PORT_HTTPS:-9443}:9443"
+    env_file:
+      - auth.env
+    depends_on:
+      - psql
+      - redis
+
+  auth-worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2023.5.3}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+    # `user: root` and the docker socket volume are optional.
+    # See more for the docker socket integration here:
+    # https://goauthentik.io/docs/outposts/integrations/docker
+    # Removing `user: root` also prevents the worker from fixing the permissions
+    # on the mounted folders, so when removing this make sure the folders have the correct UID/GID
+    # (1000:1000 by default)
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - auth_media:/media
+      - auth_certs:/certs
+      - auth_templates:/templates
+    env_file:
+      - auth.env
+    depends_on:
+      - psql
+      - redis
+
+  gitea:
+    image: gitea/gitea:latest
+    hostname: gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__PASSWD=${PG_PASS:?Password Required}
+    volumes:
+      - gitea_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - 3000
+      - 22
+    ports:
+      - "3030:22"
+    env_file:
+      - git.env
+    depends_on:
+      - auth-server
+      - psql
+
+  psql:
+    image: docker.io/library/postgres:14-alpine
+    hostname: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:?Req}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    env_file:
+      - .env
+
+  redis:
+    image: docker.io/library/redis:alpine
+    hostname: redis
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - redis:/data
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file:
+      - .env
+    depends_on:
+      - auth-server
+      - gitea
+
+volumes:
+  auth_certs:
+    driver: local
+  auth_media:
+    driver: local
+  auth_templates:
+    driver: local
+  gitea_data:
+    driver: local
+  postgres:
+    external: true
+    name: "lab_postgres"
+  redis:
+    driver: local
